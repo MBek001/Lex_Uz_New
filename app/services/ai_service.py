@@ -21,12 +21,16 @@ class AIService:
         self.emb_url = os.getenv("EMB_URL", "").strip('"')
         self.llm_url = os.getenv("LLM_URL", "").strip('"')
         self.api_key = os.getenv("API_KEY", "").strip('"')
+        self.model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct").strip('"')  # Default model
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3").strip('"')
         self.timeout = 30.0
 
         if not self.api_key:
             logger.error("API_KEY not found in environment variables!")
         else:
             logger.info(f"AI Service initialized with API key: {self.api_key[:10]}...")
+            logger.info(f"Using LLM model: {self.model_name}")
+            logger.info(f"Using embedding model: {self.embedding_model}")
 
     async def get_embedding(self, text: str) -> Optional[List[float]]:
         """
@@ -48,7 +52,7 @@ class AIService:
                     },
                     json={
                         "input": text,
-                        "model": "text-embedding-ada-002"  # Adjust model if needed
+                        "model": self.embedding_model
                     }
                 )
 
@@ -89,7 +93,7 @@ class AIService:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": "qwen",  # Adjust model name if needed
+                        "model": self.model_name,
                         "messages": messages,
                         "temperature": temperature,
                         "max_tokens": max_tokens

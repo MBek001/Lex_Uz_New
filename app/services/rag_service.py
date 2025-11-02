@@ -170,7 +170,10 @@ class RAGService:
                                 'number': metadata.number,
                                 'date': str(metadata.registration_date) if metadata.registration_date else None,
                                 'status': metadata.status,
-                                'category': metadata.category
+                                'category': metadata.category,
+                                'link_rus': metadata.link_rus,
+                                'link_uz_latin': metadata.link_uz_latin,
+                                'link_uz_cyrillic': metadata.link_uz_cyrillic
                             },
                             'content': content[:2000]  # Limit content length
                         })
@@ -208,9 +211,13 @@ class RAGService:
                 max_tokens=1500
             )
 
+            # Determine source of response
+            source = "dataset" if len(documents_context) > 0 else "ai_knowledge"
+
             return {
                 'response': response,
                 'language': language,
+                'source': source,  # NEW: Shows if response is from your dataset or AI's knowledge
                 'documents_found': len(documents_context),
                 'metadata': [doc['metadata'] for doc in documents_context]
             }
@@ -220,6 +227,9 @@ class RAGService:
             return {
                 'response': "Извините, произошла ошибка при обработке вашего запроса." if language == 'ru'
                            else "Kechirasiz, so'rovingizni qayta ishlashda xatolik yuz berdi.",
+                'source': 'error',
+                'documents_found': 0,
+                'metadata': [],
                 'error': str(e)
             }
 
@@ -231,6 +241,9 @@ class RAGService:
         context_parts = []
         for idx, doc in enumerate(documents, 1):
             meta = doc['metadata']
+            # Choose appropriate link based on language
+            link = meta.get('link_rus') if language == 'ru' else meta.get('link_uz_latin')
+
             context_parts.append(
                 f"Документ {idx}:\n"
                 f"Название: {meta['title']}\n"
@@ -239,6 +252,7 @@ class RAGService:
                 f"Дата: {meta['date']}\n"
                 f"Статус: {meta['status']}\n"
                 f"Категория: {meta['category']}\n"
+                f"Ссылка: {link}\n"
                 f"Содержание: {doc['content'][:1500]}...\n"
             )
 

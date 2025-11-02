@@ -61,5 +61,9 @@ def get_db_context():
 
 def init_db():
     """Initialize database tables"""
-    from app.models.documents import Base
-    Base.metadata.create_all(bind=engine)
+    from app.models.documents import Base as DocumentsBase
+    from app.models.metadata import Base as MetadataBase
+
+    # Create all tables
+    DocumentsBase.metadata.create_all(bind=engine)
+    MetadataBase.metadata.create_all(bind=engine)

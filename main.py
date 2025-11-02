@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from app.routers import upload
+from app.routers import upload, metadata, chat
 from app.config.database import init_db
 
 # Configure logging
@@ -42,6 +42,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(upload.router)
+app.include_router(metadata.router)
+app.include_router(chat.router)
 
 
 @app.on_event("startup")
@@ -67,6 +69,9 @@ async def root():
             "upload_uzbek": "/api/upload/uzbek",
             "stats_russian": "/api/stats/russian",
             "stats_uzbek": "/api/stats/uzbek",
+            "upload_metadata": "/api/metadata/upload/excel",
+            "chat": "/api/chat/message",
+            "search_metadata": "/api/metadata/search",
             "docs": "/docs"
         }
     }

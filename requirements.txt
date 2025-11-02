@@ -26,7 +26,13 @@ pydantic-settings==2.7.1
 # Logging and Monitoring
 python-json-logger==3.3.0
 
+# Excel processing
+pandas==2.2.3
+openpyxl==3.1.5
+
+# HTTP client for AI API
+httpx==0.28.1
+
 # Testing (optional)
 pytest==8.3.4
 pytest-asyncio==0.24.0
-httpx==0.28.1

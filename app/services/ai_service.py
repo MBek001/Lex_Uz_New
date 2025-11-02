@@ -3,8 +3,12 @@ AI Service for embeddings and chat completions using Qwen
 """
 import httpx
 import logging
+import os
 from typing import List, Dict, Optional
-import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +17,16 @@ class AIService:
     """Service for interacting with Qwen AI"""
 
     def __init__(self):
-        self.emb_url = "https://p950-w002-runai-r01-p950.runai-inference.dc.uz/v1/embeddings"
-        self.llm_url = "https://p950-w003-runai-r01-p950.runai-inference.dc.uz/v1/chat/completions"
-        self.api_key = "5df1454b1e95b2648fd89d"
+        # Load from environment variables
+        self.emb_url = os.getenv("EMB_URL", "").strip('"')
+        self.llm_url = os.getenv("LLM_URL", "").strip('"')
+        self.api_key = os.getenv("API_KEY", "").strip('"')
         self.timeout = 30.0
+
+        if not self.api_key:
+            logger.error("API_KEY not found in environment variables!")
+        else:
+            logger.info(f"AI Service initialized with API key: {self.api_key[:10]}...")
 
     async def get_embedding(self, text: str) -> Optional[List[float]]:
         """

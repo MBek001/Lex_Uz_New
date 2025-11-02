@@ -35,7 +35,7 @@ class ChatResponse(BaseModel):
     metadata: List[dict]
 
 
-@router.post("/message", response_model=ChatResponse)
+@router.post("/message")
 async def send_message(
     request: ChatRequest,
     db: Session = Depends(get_db)
@@ -78,20 +78,37 @@ async def send_message(
         )
 
         if 'error' in result:
-            raise HTTPException(status_code=500, detail=result['error'])
+            # Return error as plain text response
+            return {
+                "response": result.get('response', 'Произошла ошибка при обработке запроса.'),
+                "language": result.get('language', 'ru'),
+                "documents_found": 0,
+                "metadata": [],
+                "error": result['error']
+            }
 
-        return ChatResponse(
-            response=result['response'],
-            language=result.get('language', 'ru'),
-            documents_found=result.get('documents_found', 0),
-            metadata=result.get('metadata', [])
-        )
+        # Ensure response is not None
+        if not result.get('response'):
+            result['response'] = "Извините, не удалось получить ответ от AI сервиса."
+
+        return {
+            "response": result['response'],
+            "language": result.get('language', 'ru'),
+            "documents_found": result.get('documents_found', 0),
+            "metadata": result.get('metadata', [])
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+        return {
+            "response": "Произошла ошибка при обработке вашего сообщения. Пожалуйста, попробуйте позже.",
+            "language": "ru",
+            "documents_found": 0,
+            "metadata": [],
+            "error": str(e)
+        }
 
 
 @router.get("/health")

@@ -40,6 +40,8 @@ class DocumentProcessor:
         self.processed_count = 0
         self.error_count = 0
         self.errors = []
+        self.antiword_checked = False
+        self.antiword_available = False
 
     def extract_text_from_docx(self, file_path: str) -> Optional[str]:
         """
@@ -87,7 +89,7 @@ class DocumentProcessor:
 
     def extract_text_from_doc(self, file_path: str) -> Optional[str]:
         """
-        Extract text from DOC file using antiword, LibreOffice, or olefile.
+        Extract text from DOC file using antiword or olefile (fast methods only).
 
         Args:
             file_path: Path to the DOC file
@@ -97,46 +99,33 @@ class DocumentProcessor:
         """
         import subprocess
 
-        # Method 1: Try antiword (fast and reliable for old .doc files)
-        try:
-            result = subprocess.run(
-                ['antiword', file_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
-        except FileNotFoundError:
-            logger.debug("antiword not installed")
-        except Exception as e:
-            logger.debug(f"antiword failed: {str(e)}")
+        # Check antiword availability once
+        if not self.antiword_checked:
+            try:
+                subprocess.run(['antiword', '--version'], capture_output=True, timeout=1)
+                self.antiword_available = True
+                logger.info("✅ antiword detected - DOC files will be processed faster!")
+            except:
+                self.antiword_available = False
+                logger.warning("⚠️  antiword not installed - DOC processing will be limited. Install with: sudo apt-get install antiword")
+            self.antiword_checked = True
 
-        # Method 2: Try LibreOffice (more comprehensive but slower)
-        try:
-            import tempfile
-            with tempfile.TemporaryDirectory() as tmp_dir:
+        # Method 1: Try antiword (fast and reliable for old .doc files)
+        if self.antiword_available:
+            try:
                 result = subprocess.run(
-                    ['libreoffice', '--headless', '--convert-to', 'txt:Text',
-                     '--outdir', tmp_dir, file_path],
+                    ['antiword', file_path],
                     capture_output=True,
-                    timeout=60,
+                    text=True,
+                    timeout=5,
                     check=False
                 )
-                if result.returncode == 0:
-                    txt_file = Path(tmp_dir) / f"{Path(file_path).stem}.txt"
-                    if txt_file.exists():
-                        with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
-                            text = f.read()
-                            if text.strip():
-                                return text
-        except FileNotFoundError:
-            logger.debug("libreoffice not installed")
-        except Exception as e:
-            logger.debug(f"libreoffice failed: {str(e)}")
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout
+            except Exception as e:
+                logger.debug(f"antiword failed: {str(e)}")
 
-        # Method 3: Try olefile for basic text extraction
+        # Method 2: Try olefile for basic text extraction (FAST)
         if OLEFILE_AVAILABLE:
             try:
                 import olefile
@@ -152,12 +141,13 @@ class DocumentProcessor:
                         # Clean up excessive whitespace
                         text = ' '.join(text.split())
                         if len(text) > 50:  # Only return if we got meaningful text
+                            ole.close()
                             return text
                     ole.close()
             except Exception as e:
                 logger.debug(f"olefile extraction failed: {str(e)}")
 
-        logger.warning(f"Could not extract text from DOC file: {file_path}. Install antiword or libreoffice for better support.")
+        # If all methods fail, return None (don't spam warnings)
         return None
 
     def extract_text(self, file_path: str) -> Optional[str]:
@@ -238,8 +228,10 @@ class DocumentProcessor:
                             })
                             self.processed_count += 1
                         else:
-                            logger.warning(f"No content extracted from: {file_name}")
+                            # Count error but don't spam logs
                             self.error_count += 1
+                            if self.error_count <= 10:  # Only log first 10 errors
+                                logger.warning(f"No content extracted from: {file_name}")
                             self.errors.append(f"No content: {file_name}")
 
                         # Clean up temp file immediately

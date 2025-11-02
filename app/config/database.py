@@ -7,19 +7,28 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from contextlib import contextmanager
 from typing import Generator
+from dotenv import load_dotenv
 
-# Database configuration
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/lex_uz_db"
-)
+# Load environment variables
+load_dotenv()
+
+# Load database configuration from environment variables
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "lexuz")
+DB_DRIVER = os.getenv("DB_DRIVER", "postgresql")
+
+# Build database URL from components
+DATABASE_URL = f"{DB_DRIVER}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create engine with connection pooling for better performance
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
-    pool_size=20,  # Increased pool size for bulk operations
-    max_overflow=40,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "20")),  # Read from .env
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "40")),  # Read from .env
     pool_pre_ping=True,  # Verify connections before using
     echo=False,  # Set to True for SQL debugging
 )

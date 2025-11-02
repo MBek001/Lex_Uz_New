@@ -90,6 +90,7 @@ class DocumentProcessor:
     def extract_text_from_doc(self, file_path: str) -> Optional[str]:
         """
         Extract text from DOC file using antiword or olefile (fast methods only).
+        AGGRESSIVE MODE: Extract ANY text, even partial.
 
         Args:
             file_path: Path to the DOC file
@@ -110,44 +111,103 @@ class DocumentProcessor:
                 logger.warning("⚠️  antiword not installed - DOC processing will be limited. Install with: sudo apt-get install antiword")
             self.antiword_checked = True
 
-        # Method 1: Try antiword (fast and reliable for old .doc files)
+        # Method 1: Try antiword with UTF-8 encoding (for Cyrillic/Uzbek text)
         if self.antiword_available:
             try:
+                # Try with UTF-8 encoding first
                 result = subprocess.run(
-                    ['antiword', file_path],
+                    ['antiword', '-m', 'UTF-8.txt', file_path],
                     capture_output=True,
-                    text=True,
                     timeout=5,
                     check=False
                 )
                 if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout
+                    text = result.stdout.decode('utf-8', errors='ignore') if isinstance(result.stdout, bytes) else result.stdout
+                    if text.strip():
+                        return text
+
+                # Try without encoding specification
+                result = subprocess.run(
+                    ['antiword', file_path],
+                    capture_output=True,
+                    timeout=5,
+                    check=False
+                )
+                if result.stdout:
+                    text = result.stdout.decode('utf-8', errors='ignore') if isinstance(result.stdout, bytes) else result.stdout
+                    if text.strip():
+                        return text
+
             except Exception as e:
                 logger.debug(f"antiword failed: {str(e)}")
 
-        # Method 2: Try olefile for basic text extraction (FAST)
+        # Method 2: Try olefile for AGGRESSIVE text extraction
         if OLEFILE_AVAILABLE:
             try:
                 import olefile
                 if olefile.isOleFile(file_path):
                     ole = olefile.OleFileIO(file_path)
-                    # Try to find text streams
-                    if ole.exists('WordDocument'):
-                        # This is a basic extraction, won't get all text
-                        stream = ole.openstream('WordDocument')
-                        data = stream.read()
-                        # Extract printable ASCII/UTF-8 characters
-                        text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in data)
-                        # Clean up excessive whitespace
-                        text = ' '.join(text.split())
-                        if len(text) > 50:  # Only return if we got meaningful text
-                            ole.close()
-                            return text
+                    extracted_text = []
+
+                    # Try multiple streams
+                    for stream_name in ['WordDocument', '1Table', '0Table', 'Data']:
+                        try:
+                            if ole.exists(stream_name):
+                                stream = ole.openstream(stream_name)
+                                data = stream.read()
+
+                                # Try UTF-8 decoding
+                                try:
+                                    text = data.decode('utf-8', errors='ignore')
+                                    extracted_text.append(text)
+                                except:
+                                    pass
+
+                                # Try extracting printable characters (ASCII + extended)
+                                text = ''.join(chr(b) if 32 <= b < 256 and b != 127 else ' ' for b in data)
+                                extracted_text.append(text)
+                        except:
+                            pass
+
                     ole.close()
+
+                    # Combine all extracted text
+                    combined = ' '.join(extracted_text)
+                    combined = ' '.join(combined.split())  # Clean whitespace
+
+                    # VERY AGGRESSIVE: Accept ANY text > 10 characters
+                    if len(combined) > 10:
+                        return combined
+
             except Exception as e:
                 logger.debug(f"olefile extraction failed: {str(e)}")
 
-        # If all methods fail, return None (don't spam warnings)
+        # Method 3: LAST RESORT - Raw bytes extraction
+        try:
+            with open(file_path, 'rb') as f:
+                data = f.read()
+                # Try UTF-8 decoding
+                try:
+                    text = data.decode('utf-8', errors='ignore')
+                    # Clean and check
+                    text = ' '.join(text.split())
+                    if len(text) > 20:
+                        return text
+                except:
+                    pass
+
+                # Try Windows-1251 (Cyrillic)
+                try:
+                    text = data.decode('windows-1251', errors='ignore')
+                    text = ' '.join(text.split())
+                    if len(text) > 20:
+                        return text
+                except:
+                    pass
+        except:
+            pass
+
+        # If all methods fail, return None
         return None
 
     def extract_text(self, file_path: str) -> Optional[str]:

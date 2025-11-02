@@ -16,17 +16,16 @@ except ImportError:
     DocxDocument = None
 
 try:
-    import win32com.client
-    WORD_AVAILABLE = True
+    import docx2txt
+    DOCX2TXT_AVAILABLE = True
 except ImportError:
-    WORD_AVAILABLE = False
+    DOCX2TXT_AVAILABLE = False
 
-# Alternative: use textract or antiword for .doc files
 try:
-    import textract
-    TEXTRACT_AVAILABLE = True
+    import olefile
+    OLEFILE_AVAILABLE = True
 except ImportError:
-    TEXTRACT_AVAILABLE = False
+    OLEFILE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ class DocumentProcessor:
 
     def extract_text_from_docx(self, file_path: str) -> Optional[str]:
         """
-        Extract text from DOCX file using python-docx.
+        Extract text from DOCX file using python-docx or docx2txt.
 
         Args:
             file_path: Path to the DOCX file
@@ -52,34 +51,43 @@ class DocumentProcessor:
         Returns:
             Extracted text or None if extraction fails
         """
-        if DocxDocument is None:
-            logger.error("python-docx not installed")
-            return None
+        # Try python-docx first (more reliable)
+        if DocxDocument is not None:
+            try:
+                doc = DocxDocument(file_path)
+                full_text = []
 
-        try:
-            doc = DocxDocument(file_path)
-            full_text = []
+                # Extract text from paragraphs
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        full_text.append(para.text)
 
-            # Extract text from paragraphs
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    full_text.append(para.text)
+                # Extract text from tables
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                full_text.append(cell.text)
 
-            # Extract text from tables
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            full_text.append(cell.text)
+                return '\n'.join(full_text)
+            except Exception as e:
+                logger.warning(f"python-docx failed, trying docx2txt: {str(e)}")
 
-            return '\n'.join(full_text)
-        except Exception as e:
-            logger.error(f"Error extracting text from {file_path}: {str(e)}")
-            return None
+        # Fallback to docx2txt
+        if DOCX2TXT_AVAILABLE:
+            try:
+                text = docx2txt.process(file_path)
+                if text and text.strip():
+                    return text.strip()
+            except Exception as e:
+                logger.error(f"Error extracting text with docx2txt from {file_path}: {str(e)}")
+
+        logger.error("No DOCX extraction library available")
+        return None
 
     def extract_text_from_doc(self, file_path: str) -> Optional[str]:
         """
-        Extract text from DOC file using textract or antiword.
+        Extract text from DOC file using antiword, LibreOffice, or olefile.
 
         Args:
             file_path: Path to the DOC file
@@ -87,28 +95,69 @@ class DocumentProcessor:
         Returns:
             Extracted text or None if extraction fails
         """
-        if TEXTRACT_AVAILABLE:
-            try:
-                text = textract.process(file_path).decode('utf-8', errors='ignore')
-                return text
-            except Exception as e:
-                logger.error(f"Error extracting text with textract from {file_path}: {str(e)}")
+        import subprocess
 
-        # Fallback: try antiword command if available
+        # Method 1: Try antiword (fast and reliable for old .doc files)
         try:
-            import subprocess
             result = subprocess.run(
                 ['antiword', file_path],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                check=False
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return result.stdout
+        except FileNotFoundError:
+            logger.debug("antiword not installed")
         except Exception as e:
-            logger.error(f"Error extracting text with antiword from {file_path}: {str(e)}")
+            logger.debug(f"antiword failed: {str(e)}")
 
-        logger.warning(f"Could not extract text from DOC file: {file_path}")
+        # Method 2: Try LibreOffice (more comprehensive but slower)
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                result = subprocess.run(
+                    ['libreoffice', '--headless', '--convert-to', 'txt:Text',
+                     '--outdir', tmp_dir, file_path],
+                    capture_output=True,
+                    timeout=60,
+                    check=False
+                )
+                if result.returncode == 0:
+                    txt_file = Path(tmp_dir) / f"{Path(file_path).stem}.txt"
+                    if txt_file.exists():
+                        with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
+                            text = f.read()
+                            if text.strip():
+                                return text
+        except FileNotFoundError:
+            logger.debug("libreoffice not installed")
+        except Exception as e:
+            logger.debug(f"libreoffice failed: {str(e)}")
+
+        # Method 3: Try olefile for basic text extraction
+        if OLEFILE_AVAILABLE:
+            try:
+                import olefile
+                if olefile.isOleFile(file_path):
+                    ole = olefile.OleFileIO(file_path)
+                    # Try to find text streams
+                    if ole.exists('WordDocument'):
+                        # This is a basic extraction, won't get all text
+                        stream = ole.openstream('WordDocument')
+                        data = stream.read()
+                        # Extract printable ASCII/UTF-8 characters
+                        text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in data)
+                        # Clean up excessive whitespace
+                        text = ' '.join(text.split())
+                        if len(text) > 50:  # Only return if we got meaningful text
+                            return text
+                    ole.close()
+            except Exception as e:
+                logger.debug(f"olefile extraction failed: {str(e)}")
+
+        logger.warning(f"Could not extract text from DOC file: {file_path}. Install antiword or libreoffice for better support.")
         return None
 
     def extract_text(self, file_path: str) -> Optional[str]:

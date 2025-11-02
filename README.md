@@ -17,7 +17,7 @@ A robust, production-ready system for importing large batches of Russian and Uzb
 
 - **Framework**: FastAPI (async, high-performance)
 - **Database**: PostgreSQL with SQLAlchemy ORM
-- **Document Processing**: python-docx + textract
+- **Document Processing**: python-docx, docx2txt, antiword, LibreOffice (with fallbacks)
 - **Connection Pooling**: Optimized for bulk operations
 - **Deployment**: Docker + Docker Compose
 
@@ -96,8 +96,14 @@ python --version
 # PostgreSQL 13+
 psql --version
 
-# System dependencies (Ubuntu/Debian)
-sudo apt-get install antiword python3-dev libpq-dev
+# System dependencies for document processing (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y antiword libreoffice python3-dev libpq-dev
+
+# macOS
+brew install antiword
+
+# Note: antiword and libreoffice are optional but recommended for better .doc support
 ```
 
 2. **Install Python dependencies**:

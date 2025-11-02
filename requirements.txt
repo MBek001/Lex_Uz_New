@@ -10,10 +10,13 @@ alembic==1.13.1
 
 # Document Processing
 python-docx==1.1.0
-textract==1.6.5
+docx2txt==0.8  # Lightweight alternative for DOCX
+olefile==0.47  # For older DOC files
 
-# Optional: For better DOC support (requires antiword system package)
-# Install system package: sudo apt-get install antiword
+# Optional: For better DOC support, install system packages:
+# Ubuntu/Debian: sudo apt-get install antiword libreoffice
+# macOS: brew install antiword
+# These provide better support for legacy .doc files
 
 # Utilities
 python-dotenv==1.0.0

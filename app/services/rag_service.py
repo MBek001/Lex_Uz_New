@@ -79,30 +79,54 @@ class RAGService:
                 .limit(limit * 2)\
                 .all()
 
-            # Score and rank results
+            # Score and rank results with improved prioritization
             scored_results = []
             for doc in results:
                 score = 0
-                doc_text = f"{doc.title} {doc.doc_type} {doc.number or ''}".lower()
+                doc_number = (doc.number or '').lower()
+                doc_title = doc.title.lower()
+                doc_type = doc.doc_type.lower()
+                doc_category = (doc.category or '').lower()
 
-                # Count keyword matches
-                for keyword in keywords:
-                    if keyword in doc_text:
-                        score += 1
-
-                # Boost if document number matches
+                # PRIORITY 1: Exact number matches (HIGHEST PRIORITY)
                 for num in numbers:
-                    if num in (doc.number or ''):
+                    # Exact match in number field
+                    if doc_number == num.lower():
+                        score += 100
+                        logger.info(f"   🎯 EXACT NUMBER MATCH: {doc.number} = {num}")
+                    # Number field contains the searched number
+                    elif num in doc_number:
+                        score += 50
+                        logger.info(f"   ✓ Number contains: {num} in {doc.number}")
+                    # Number appears in title
+                    elif num in doc_title:
+                        score += 10
+
+                # PRIORITY 2: Keyword matches in different fields
+                for keyword in keywords:
+                    # Title match (important)
+                    if keyword in doc_title:
                         score += 5
+                    # Doc type match
+                    if keyword in doc_type:
+                        score += 3
+                    # Category match
+                    if keyword in doc_category:
+                        score += 2
 
                 if score > 0:
                     scored_results.append((score, doc))
+                    logger.debug(f"   Document scored {score}: {doc.title[:50]}... (Number: {doc.number})")
 
-            # Sort by score and return top results
+            # Sort by score (highest first) and return top results
             scored_results.sort(reverse=True, key=lambda x: x[0])
             final_results = [doc for score, doc in scored_results[:limit]]
 
+            # Log top results with scores
             logger.info(f"✅ [METADATA] Found {len(final_results)} documents")
+            for idx, (score, doc) in enumerate(scored_results[:limit], 1):
+                logger.info(f"   #{idx} Score={score}: {doc.title[:60]}... (№{doc.number})")
+
             return final_results
 
         except Exception as e:

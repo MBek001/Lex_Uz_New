@@ -111,6 +111,93 @@ class AIService:
             logger.error(f"Error getting chat completion: {str(e)}")
             return None
 
+    async def extract_search_keywords(
+        self,
+        user_message: str,
+        language: str
+    ) -> Dict[str, any]:
+        """
+        FIRST STAGE AI: Extract search keywords and intent from user message.
+        This AI only analyzes the query, does NOT generate final response.
+
+        Args:
+            user_message: User's question
+            language: Detected language ('ru' or 'uz')
+
+        Returns:
+            Dict with keywords, document_numbers, categories, intent
+        """
+        try:
+            system_prompt = """You are a search query analyzer for a legal document database.
+Your task is to extract key information from the user's question to help search for relevant documents.
+
+Extract and return ONLY these items in JSON format:
+{
+  "keywords": ["word1", "word2"],  // Main search terms
+  "document_numbers": ["123", "456"],  // Any document/law numbers mentioned
+  "categories": ["category1"],  // Document type/category if mentioned
+  "intent": "brief description of what user wants"
+}
+
+Examples:
+User: "prokratura tizimi haqida malumot ber"
+Return: {"keywords": ["прокуратура", "система", "prokuratura"], "document_numbers": [], "categories": ["закон", "qonun"], "intent": "information about prosecutor system"}
+
+User: "940 sonli qonun"
+Return: {"keywords": ["закон", "qonun"], "document_numbers": ["940"], "categories": ["qonun", "закон"], "intent": "law number 940"}
+
+IMPORTANT: Return ONLY the JSON, no other text."""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+
+            response = await self.chat_completion(
+                messages=messages,
+                temperature=0.3,  # Lower temperature for more focused extraction
+                max_tokens=300
+            )
+
+            if not response:
+                # Fallback: simple extraction
+                return {
+                    "keywords": user_message.split()[:5],
+                    "document_numbers": [],
+                    "categories": [],
+                    "intent": user_message
+                }
+
+            # Try to parse JSON response
+            import json
+            try:
+                # Extract JSON from response (in case AI adds extra text)
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    result = json.loads(response[json_start:json_end])
+                    logger.info(f"Extracted search keywords: {result}")
+                    return result
+                else:
+                    raise ValueError("No JSON found in response")
+            except:
+                # Fallback
+                return {
+                    "keywords": user_message.split()[:5],
+                    "document_numbers": [],
+                    "categories": [],
+                    "intent": user_message
+                }
+
+        except Exception as e:
+            logger.error(f"Error extracting keywords: {str(e)}")
+            return {
+                "keywords": user_message.split()[:5],
+                "document_numbers": [],
+                "categories": [],
+                "intent": user_message
+            }
+
     def detect_language(self, text: str) -> str:
         """
         Detect language from text (Russian or Uzbek).

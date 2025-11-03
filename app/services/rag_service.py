@@ -1,12 +1,15 @@
 """
-RAG (Retrieval-Augmented Generation) Service
-Handles document search and AI chat with context
+IMPROVED RAG (Retrieval-Augmented Generation) Service
+Features:
+- Two-stage AI process (search extraction + response generation)
+- Full-text search with PostgreSQL for speed
+- Better document matching from ru_documents and uz_documents tables
+- Detailed logging showing which tables are used
 """
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, text, func
 import logging
-import re
 
 from app.models.metadata import DocumentMetadata
 from app.models.documents import RussianDocument, UzbekDocument
@@ -16,208 +19,280 @@ logger = logging.getLogger(__name__)
 
 
 class RAGService:
-    """RAG service for intelligent document search and chat"""
+    """Improved RAG service with two-stage AI and fast full-text search"""
 
     def __init__(self):
         self.ai_service = AIService()
 
-    async def extract_search_keywords(self, user_message: str, language: str) -> List[str]:
-        """
-        Use AI to extract key search terms from user's natural language question.
-
-        Args:
-            user_message: User's question in natural language
-            language: Detected language ('ru' or 'uz')
-
-        Returns:
-            List of search keywords
-        """
-        try:
-            if language == 'ru':
-                prompt = f"""Извлеките ключевые слова для поиска в базе данных юридических документов из вопроса пользователя.
-Верните только ключевые слова через запятую, без объяснений.
-
-Вопрос: {user_message}
-
-Ключевые слова:"""
-            else:
-                prompt = f"""Foydalanuvchi savolidan qonuniy hujjatlar bazasidan qidirish uchun asosiy kalit so'zlarni ajratib oling.
-Faqat kalit so'zlarni vergul bilan qaytaring, tushuntirmasdan.
-
-Savol: {user_message}
-
-Kalit so'zlar:"""
-
-            messages = [{"role": "user", "content": prompt}]
-            response = await self.ai_service.chat_completion(
-                messages=messages,
-                temperature=0.3,
-                max_tokens=50
-            )
-
-            # Extract keywords from response
-            keywords = [kw.strip() for kw in response.split(',') if kw.strip()]
-
-            # Also extract words from original message (fallback)
-            # Remove common words
-            common_words = {
-                'ru': ['о', 'в', 'на', 'с', 'по', 'для', 'от', 'до', 'из', 'к', 'у', 'и', 'а', 'но', 'что', 'как', 'это', 'мне', 'расскажите', 'покажите', 'дайте', 'информацию', 'данные'],
-                'uz': ['haqida', 'haqidagi', 'bo\'yicha', 'uchun', 'bilan', 'dan', 'ga', 'ning', 'va', 'yoki', 'lekin', 'nima', 'qanday', 'bu', 'menga', 'aytib', 'bering', 'malumot', 'ma\'lumot']
-            }
-
-            words = re.findall(r'\b\w+\b', user_message.lower())
-            filtered_words = [w for w in words if w not in common_words.get(language, []) and len(w) > 2]
-
-            # Combine AI keywords with filtered words
-            all_keywords = list(set(keywords + filtered_words))
-
-            logger.info(f"Extracted keywords: {all_keywords}")
-            return all_keywords[:10]  # Limit to top 10
-
-        except Exception as e:
-            logger.error(f"Error extracting keywords: {str(e)}")
-            # Fallback: return words from message
-            return [w for w in re.findall(r'\b\w+\b', user_message.lower()) if len(w) > 3][:5]
-
-    async def search_metadata(
+    async def search_documents_fulltext(
         self,
         db: Session,
         keywords: List[str],
-        limit: int = 5
-    ) -> List[DocumentMetadata]:
+        language: str,
+        limit: int = 10
+    ) -> List[Dict]:
         """
-        Search document metadata using extracted keywords.
+        Search directly in ru_documents/uz_documents using full-text search.
+        This is MUCH faster than ILIKE and searches actual document content.
 
         Args:
             db: Database session
             keywords: List of search keywords
+            language: 'ru' or 'uz'
             limit: Maximum number of results
 
         Returns:
-            List of matching DocumentMetadata objects
+            List of documents with content
         """
         try:
-            if not keywords:
-                return []
+            model_class = RussianDocument if language == 'ru' else UzbekDocument
+            table_name = 'ru_documents' if language == 'ru' else 'uz_documents'
 
-            # Build OR conditions for each keyword
-            conditions = []
-            for keyword in keywords:
-                keyword_pattern = f'%{keyword}%'
-                conditions.append(
-                    or_(
-                        DocumentMetadata.title.ilike(keyword_pattern),
-                        DocumentMetadata.doc_type.ilike(keyword_pattern),
-                        DocumentMetadata.category.ilike(keyword_pattern),
-                        DocumentMetadata.number.ilike(keyword_pattern)
-                    )
-                )
+            logger.info(f"🔍 [SEARCH] Searching in {table_name} table with keywords: {keywords}")
 
-            # Combine all conditions with OR
-            combined_condition = or_(*conditions)
+            # Build search query
+            search_terms = ' | '.join(keywords)  # OR search
 
-            # Execute search
-            results = db.query(DocumentMetadata)\
-                .filter(combined_condition)\
-                .filter(
-                    # Prefer active documents (status = "0")
-                    or_(
-                        DocumentMetadata.status == "0",
-                        DocumentMetadata.status == "",
-                        DocumentMetadata.status == None
-                    )
-                )\
-                .limit(limit * 3)\
-                .all()
+            # Use full-text search with ranking
+            query = text(f"""
+                SELECT id, title, content,
+                       ts_rank(search_vector, to_tsquery('russian', :search_terms)) as rank
+                FROM {table_name}
+                WHERE search_vector @@ to_tsquery('russian', :search_terms)
+                ORDER BY rank DESC
+                LIMIT :limit
+            """)
 
-            if not results:
-                logger.warning(f"No results found for keywords: {keywords}")
-                return []
+            result = db.execute(query, {
+                'search_terms': search_terms,
+                'limit': limit
+            })
 
-            # Score results based on keyword matches
-            scored_results = []
-            for doc in results:
-                score = 0
-                doc_text = f"{doc.title} {doc.doc_type} {doc.category or ''} {doc.number or ''}".lower()
+            documents = []
+            for row in result:
+                documents.append({
+                    'id': row[0],
+                    'title': row[1],
+                    'content': row[2][:3000],  # First 3000 chars
+                    'rank': row[3],
+                    'source_table': table_name
+                })
 
-                for keyword in keywords:
-                    keyword_lower = keyword.lower()
-                    if keyword_lower in doc_text:
-                        # Title match is most important
-                        if keyword_lower in doc.title.lower():
-                            score += 10
-                        # Doc type match
-                        if keyword_lower in doc.doc_type.lower():
-                            score += 7
-                        # Category match
-                        if doc.category and keyword_lower in doc.category.lower():
-                            score += 5
-                        # Number match
-                        if doc.number and keyword_lower in doc.number.lower():
-                            score += 8
+            logger.info(f"✅ [SEARCH] Found {len(documents)} documents in {table_name}")
+            for doc in documents[:3]:  # Log top 3
+                logger.info(f"  📄 {doc['title']} (rank: {doc['rank']:.4f})")
 
-                if score > 0:
-                    scored_results.append((score, doc))
-
-            # Sort by score and return top results
-            scored_results.sort(reverse=True, key=lambda x: x[0])
-            top_results = [doc for score, doc in scored_results[:limit]]
-
-            logger.info(f"Found {len(top_results)} documents with scores")
-            return top_results
+            return documents
 
         except Exception as e:
-            logger.error(f"Error searching metadata: {str(e)}")
-            return []
+            logger.error(f"❌ [SEARCH ERROR] Full-text search in {table_name} failed: {str(e)}")
+            # Fallback to LIKE search if full-text search fails (indexes not created yet)
+            return await self._fallback_search_documents(db, keywords, language, limit)
 
-    def get_document_content(
+    async def _fallback_search_documents(
         self,
         db: Session,
-        doc_id: str,
-        language: str
-    ) -> Optional[str]:
+        keywords: List[str],
+        language: str,
+        limit: int
+    ) -> List[Dict]:
         """
-        Get full document content by ID and language.
+        Fallback search using LIKE when full-text indexes don't exist yet.
+        """
+        try:
+            model_class = RussianDocument if language == 'ru' else UzbekDocument
+            table_name = 'ru_documents' if language == 'ru' else 'uz_documents'
+
+            logger.warning(f"⚠️ [FALLBACK] Using LIKE search in {table_name} (slower)")
+
+            # Build LIKE conditions
+            conditions = []
+            for keyword in keywords[:5]:  # Limit to 5 keywords
+                conditions.append(model_class.title.ilike(f'%{keyword}%'))
+                conditions.append(model_class.content.ilike(f'%{keyword}%'))
+
+            query = db.query(model_class).filter(or_(*conditions)).limit(limit)
+
+            documents = []
+            for doc in query:
+                documents.append({
+                    'id': doc.id,
+                    'title': doc.title,
+                    'content': doc.content[:3000],
+                    'rank': 0.5,
+                    'source_table': table_name
+                })
+
+            logger.info(f"✅ [FALLBACK] Found {len(documents)} documents")
+            return documents
+
+        except Exception as e:
+            logger.error(f"❌ [FALLBACK ERROR]: {str(e)}")
+            return []
+
+    async def search_metadata_fulltext(
+        self,
+        db: Session,
+        keywords: List[str],
+        document_numbers: List[str],
+        limit: int = 5
+    ) -> List[DocumentMetadata]:
+        """
+        Search metadata using full-text search.
+        Faster than ILIKE for large datasets.
 
         Args:
             db: Database session
-            doc_id: Document ID (e.g., "7630588" or "-7630445")
+            keywords: Search keywords
+            document_numbers: Specific document numbers if mentioned
+            limit: Maximum results
+
+        Returns:
+            List of DocumentMetadata objects
+        """
+        try:
+            logger.info(f"🔍 [METADATA SEARCH] Keywords: {keywords}, Numbers: {document_numbers}")
+
+            # If specific document numbers mentioned, search by number first
+            if document_numbers:
+                number_results = db.query(DocumentMetadata).filter(
+                    or_(*[DocumentMetadata.number.ilike(f'%{num}%') for num in document_numbers])
+                ).limit(limit).all()
+
+                if number_results:
+                    logger.info(f"✅ [METADATA] Found {len(number_results)} documents by number")
+                    return number_results
+
+            # Use full-text search
+            search_terms = ' | '.join(keywords[:10])  # Limit keywords
+
+            query = text("""
+                SELECT *, ts_rank(search_vector, to_tsquery('russian', :search_terms)) as rank
+                FROM document_metadata
+                WHERE search_vector @@ to_tsquery('russian', :search_terms)
+                  AND (status = '0' OR status = '')
+                ORDER BY rank DESC
+                LIMIT :limit
+            """)
+
+            result = db.execute(query, {
+                'search_terms': search_terms,
+                'limit': limit
+            })
+
+            metadata_list = []
+            for row in result:
+                metadata = db.query(DocumentMetadata).filter(DocumentMetadata.id == row[0]).first()
+                if metadata:
+                    metadata_list.append(metadata)
+
+            logger.info(f"✅ [METADATA] Found {len(metadata_list)} metadata records")
+            return metadata_list
+
+        except Exception as e:
+            logger.error(f"❌ [METADATA SEARCH ERROR]: {str(e)}")
+            # Fallback to LIKE search
+            return await self._fallback_search_metadata(db, keywords, limit)
+
+    async def _fallback_search_metadata(
+        self,
+        db: Session,
+        keywords: List[str],
+        limit: int
+    ) -> List[DocumentMetadata]:
+        """Fallback metadata search using LIKE"""
+        try:
+            logger.warning("⚠️ [FALLBACK] Using LIKE search for metadata")
+
+            conditions = []
+            for keyword in keywords[:5]:
+                conditions.extend([
+                    DocumentMetadata.title.ilike(f'%{keyword}%'),
+                    DocumentMetadata.doc_type.ilike(f'%{keyword}%'),
+                    DocumentMetadata.category.ilike(f'%{keyword}%')
+                ])
+
+            results = db.query(DocumentMetadata)\
+                .filter(or_(*conditions))\
+                .filter(or_(
+                    DocumentMetadata.status == "0",
+                    DocumentMetadata.status == ""
+                ))\
+                .limit(limit * 2)\
+                .all()
+
+            logger.info(f"✅ [FALLBACK] Found {len(results)} metadata records")
+            return results[:limit]
+
+        except Exception as e:
+            logger.error(f"❌ [FALLBACK METADATA ERROR]: {str(e)}")
+            return []
+
+    async def get_documents_by_metadata(
+        self,
+        db: Session,
+        metadata_list: List[DocumentMetadata],
+        language: str
+    ) -> List[Dict]:
+        """
+        Get full documents matching metadata links.
+        Tries multiple matching strategies.
+
+        Args:
+            db: Database session
+            metadata_list: List of metadata objects
             language: 'ru' or 'uz'
 
         Returns:
-            Document content or None
+            List of documents with metadata and content
         """
         try:
-            # The document title in database is like "-7630588.doc"
-            title_pattern = f"{doc_id}.doc"
-
-            # Choose table based on language
             model_class = RussianDocument if language == 'ru' else UzbekDocument
+            table_name = 'ru_documents' if language == 'ru' else 'uz_documents'
 
-            # Search by title
-            doc = db.query(model_class)\
-                .filter(model_class.title.ilike(f'%{title_pattern}%'))\
-                .first()
+            logger.info(f"🔗 [MATCHING] Trying to match {len(metadata_list)} metadata with {table_name}")
 
-            if doc:
-                logger.info(f"Found document with ID {doc_id} in {language} documents")
-                return doc.content
+            documents = []
+            for meta in metadata_list:
+                # Extract doc ID from link
+                doc_id = meta.get_doc_id_from_link(language)
 
-            # Try without extension
-            doc = db.query(model_class)\
-                .filter(model_class.title.ilike(f'%{doc_id}%'))\
-                .first()
+                if not doc_id:
+                    logger.warning(f"⚠️ [MATCHING] No doc_id found for: {meta.title}")
+                    continue
 
-            if doc:
-                logger.info(f"Found document with ID {doc_id} (without extension)")
-                return doc.content
+                # Strategy 1: Match by doc_id in title (e.g., "-7630588.doc")
+                doc = db.query(model_class)\
+                    .filter(model_class.title.ilike(f'%{doc_id}%'))\
+                    .first()
 
-            logger.warning(f"Document with ID {doc_id} not found in {language} documents")
-            return None
+                if doc:
+                    logger.info(f"✅ [MATCH] Found document in {table_name}: {doc.title}")
+                    documents.append({
+                        'metadata': {
+                            'title': meta.title,
+                            'doc_type': meta.doc_type,
+                            'number': meta.number,
+                            'date': str(meta.registration_date) if meta.registration_date else None,
+                            'status': meta.status,
+                            'category': meta.category,
+                            'link_rus': meta.link_rus,
+                            'link_uz_latin': meta.link_uz_latin,
+                            'link_uz_cyrillic': meta.link_uz_cyrillic
+                        },
+                        'content': doc.content[:3000],
+                        'source_table': table_name,
+                        'document_id': doc.id
+                    })
+                else:
+                    logger.warning(f"⚠️ [NO MATCH] No document found in {table_name} for doc_id: {doc_id}")
+
+            logger.info(f"✅ [MATCHING] Successfully matched {len(documents)}/{len(metadata_list)} documents")
+            return documents
 
         except Exception as e:
-            logger.error(f"Error getting document content: {str(e)}")
-            return None
+            logger.error(f"❌ [MATCHING ERROR]: {str(e)}")
+            return []
 
     async def chat(
         self,
@@ -226,17 +301,9 @@ Kalit so'zlar:"""
         conversation_history: List[Dict[str, str]] = None
     ) -> Dict:
         """
-        Main chat function with RAG.
-
-        Flow:
-        1. Detect language
-        2. Extract keywords from user message using AI
-        3. Search metadata using keywords
-        4. Get document IDs from metadata links
-        5. Fetch full content from documents tables
-        6. Build context with metadata + content
-        7. Send to AI with context
-        8. Return response with links
+        TWO-STAGE AI PROCESS:
+        Stage 1: AI extracts search keywords (no user response)
+        Stage 2: Search documents + AI generates response with context
 
         Args:
             db: Database session
@@ -247,45 +314,58 @@ Kalit so'zlar:"""
             Dict with response and metadata
         """
         try:
-            # 1. Detect language
+            # Detect language
             language = self.ai_service.detect_language(user_message)
-            logger.info(f"Detected language: {language}")
+            logger.info(f"🌍 [LANGUAGE] Detected: {language}")
 
-            # 2. Extract search keywords from user message
-            keywords = await self.extract_search_keywords(user_message, language)
-            logger.info(f"Extracted keywords: {keywords}")
+            # STAGE 1: AI extracts search keywords (FIRST AI CALL)
+            logger.info("🤖 [STAGE 1] AI extracting search keywords...")
+            search_data = await self.ai_service.extract_search_keywords(user_message, language)
 
-            # 3. Search for relevant metadata using keywords
-            metadata_results = await self.search_metadata(db, keywords, limit=5)
-            logger.info(f"Found {len(metadata_results)} metadata results")
+            keywords = search_data.get('keywords', [])
+            document_numbers = search_data.get('document_numbers', [])
+            categories = search_data.get('categories', [])
+            intent = search_data.get('intent', '')
 
-            # 4. Retrieve full document contents
-            documents_context = []
-            for metadata in metadata_results:
-                doc_id = metadata.get_doc_id_from_link(language)
-                if doc_id:
-                    content = self.get_document_content(db, doc_id, language)
-                    if content:
-                        documents_context.append({
-                            'metadata': {
-                                'title': metadata.title,
-                                'doc_type': metadata.doc_type,
-                                'number': metadata.number,
-                                'date': str(metadata.registration_date) if metadata.registration_date else None,
-                                'status': metadata.status,
-                                'category': metadata.category,
-                                'link_rus': metadata.link_rus,
-                                'link_uz_latin': metadata.link_uz_latin,
-                                'link_uz_cyrillic': metadata.link_uz_cyrillic
-                            },
-                            'content': content[:3000]  # Increased to 3000 chars for more context
-                        })
-                        logger.info(f"Added document: {metadata.title} (ID: {doc_id})")
+            logger.info(f"📊 [STAGE 1 RESULT] Intent: {intent}")
+            logger.info(f"  Keywords: {keywords}")
+            logger.info(f"  Doc numbers: {document_numbers}")
 
-            # 5. Build context for AI
-            context_text = self._build_context(documents_context, language)
+            # SEARCH PHASE: Use extracted keywords to search
+            all_documents = []
 
-            # 6. Prepare messages for AI
+            # Search 1: Search in document content directly (ru_documents/uz_documents)
+            logger.info("📚 [SEARCH PHASE] Searching document content...")
+            content_docs = await self.search_documents_fulltext(
+                db, keywords + document_numbers, language, limit=5
+            )
+            all_documents.extend(content_docs)
+
+            # Search 2: Search metadata and match with documents
+            logger.info("📋 [SEARCH PHASE] Searching metadata...")
+            metadata_results = await self.search_metadata_fulltext(
+                db, keywords, document_numbers, limit=3
+            )
+
+            if metadata_results:
+                matched_docs = await self.get_documents_by_metadata(db, metadata_results, language)
+                all_documents.extend(matched_docs)
+
+            # Remove duplicates by document_id
+            seen_ids = set()
+            unique_docs = []
+            for doc in all_documents:
+                doc_id = doc.get('document_id') or doc.get('id')
+                if doc_id not in seen_ids:
+                    seen_ids.add(doc_id)
+                    unique_docs.append(doc)
+
+            logger.info(f"📑 [SEARCH RESULT] Total unique documents found: {len(unique_docs)}")
+
+            # STAGE 2: AI generates response with context (SECOND AI CALL)
+            logger.info("🤖 [STAGE 2] AI generating response with context...")
+
+            context_text = self._build_context(unique_docs, language)
             system_message = self._get_system_message(language)
 
             messages = [
@@ -294,50 +374,62 @@ Kalit so'zlar:"""
 
             # Add conversation history if provided
             if conversation_history:
-                # Filter out empty content
-                valid_history = [msg for msg in conversation_history if msg.get('content', '').strip()]
-                messages.extend(valid_history[-4:])  # Last 4 messages for context
+                messages.extend(conversation_history[-4:])
 
             # Add context and user message
             if context_text:
-                if language == 'ru':
-                    messages.append({
-                        "role": "user",
-                        "content": f"Контекст из базы данных:\n{context_text}\n\nВопрос пользователя: {user_message}\n\nВажно: Используйте только информацию из предоставленного контекста. Обязательно укажите ссылки на документы."
-                    })
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": f"Ma'lumotlar bazasidan kontekst:\n{context_text}\n\nFoydalanuvchi savoli: {user_message}\n\nMuhim: Faqat taqdim etilgan kontekstdan foydalaning. Hujjatlarga havolalarni ko'rsating."
-                    })
+                messages.append({
+                    "role": "user",
+                    "content": f"Контекст:\n{context_text}\n\nВопрос: {user_message}"
+                })
             else:
                 messages.append({
                     "role": "user",
                     "content": user_message
                 })
-                logger.warning("No documents found, AI will use general knowledge")
 
-            # 7. Get AI response
+            # Get AI response
             response = await self.ai_service.chat_completion(
                 messages=messages,
                 temperature=0.7,
-                max_tokens=2000
+                max_tokens=1500
             )
 
-            # Determine source of response
-            source = "dataset" if len(documents_context) > 0 else "ai_knowledge"
+            # Determine source
+            source = "dataset" if len(unique_docs) > 0 else "ai_knowledge"
+            logger.info(f"✅ [COMPLETE] Response source: {source}")
+
+            # Extract metadata for response
+            metadata_for_response = []
+            for doc in unique_docs[:5]:  # Top 5 documents
+                if 'metadata' in doc:
+                    metadata_for_response.append(doc['metadata'])
+                else:
+                    # Document from content search
+                    metadata_for_response.append({
+                        'title': doc.get('title', ''),
+                        'source_table': doc.get('source_table', ''),
+                        'document_id': doc.get('id')
+                    })
 
             return {
                 'response': response,
                 'language': language,
                 'source': source,
-                'keywords_used': keywords,  # Show which keywords were used for search
-                'documents_found': len(documents_context),
-                'metadata': [doc['metadata'] for doc in documents_context]
+                'documents_found': len(unique_docs),
+                'metadata': metadata_for_response,
+                'search_info': {
+                    'keywords': keywords,
+                    'document_numbers': document_numbers,
+                    'intent': intent
+                }
             }
 
         except Exception as e:
-            logger.error(f"Error in chat: {str(e)}", exc_info=True)
+            logger.error(f"❌ [CHAT ERROR]: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+
             return {
                 'response': "Извините, произошла ошибка при обработке вашего запроса." if language == 'ru'
                            else "Kechirasiz, so'rovingizni qayta ishlashda xatolik yuz berdi.",
@@ -353,30 +445,27 @@ Kalit so'zlar:"""
             return ""
 
         context_parts = []
-        for idx, doc in enumerate(documents, 1):
-            meta = doc['metadata']
-            # Choose appropriate link based on language
-            link = meta.get('link_rus') if language == 'ru' else meta.get('link_uz_latin')
+        for idx, doc in enumerate(documents[:5], 1):  # Top 5 documents
+            if 'metadata' in doc:
+                # Document with metadata
+                meta = doc['metadata']
+                link = meta.get('link_rus') if language == 'ru' else meta.get('link_uz_latin')
 
-            if language == 'ru':
                 context_parts.append(
-                    f"Документ {idx}:\n"
+                    f"Документ {idx} (из таблицы metadata):\n"
                     f"Название: {meta['title']}\n"
                     f"Тип: {meta['doc_type']}\n"
                     f"Номер: {meta['number']}\n"
                     f"Дата: {meta['date']}\n"
                     f"Ссылка: {link}\n"
-                    f"Содержание: {doc['content'][:2000]}...\n"
+                    f"Содержание: {doc['content'][:1500]}...\n"
                 )
             else:
+                # Document from direct content search
                 context_parts.append(
-                    f"Hujjat {idx}:\n"
-                    f"Nomi: {meta['title']}\n"
-                    f"Turi: {meta['doc_type']}\n"
-                    f"Raqami: {meta['number']}\n"
-                    f"Sana: {meta['date']}\n"
-                    f"Havola: {link}\n"
-                    f"Mazmuni: {doc['content'][:2000]}...\n"
+                    f"Документ {idx} (из таблицы {doc.get('source_table', 'unknown')}):\n"
+                    f"Файл: {doc.get('title', 'unknown')}\n"
+                    f"Содержание: {doc.get('content', '')[:1500]}...\n"
                 )
 
         return "\n---\n".join(context_parts)
@@ -385,19 +474,13 @@ Kalit so'zlar:"""
         """Get system message for AI based on language"""
         if language == 'ru':
             return """Вы - помощник по правовым вопросам Узбекистана.
-Ваша задача - отвечать на вопросы пользователей о законах и нормативных актах на основе предоставленных документов.
-
-ВАЖНО:
-- Используйте ТОЛЬКО информацию из предоставленного контекста документов
-- ВСЕГДА указывайте ссылки на документы, откуда взята информация
-- Если в контексте нет нужной информации, честно скажите об этом
-- Отвечайте четко и структурированно"""
+Ваша задача - отвечать на вопросы пользователей о законах и нормативных актах.
+Используйте предоставленный контекст документов для точных ответов.
+Отвечайте кратко, но полно. Если информации недостаточно, так и скажите.
+Всегда указывайте источник информации (название документа, ссылку если есть)."""
         else:
             return """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchisiz.
-Sizning vazifangiz - taqdim etilgan hujjatlar asosida foydalanuvchilarning qonunlar va me'yoriy hujjatlar haqidagi savollariga javob berish.
-
-MUHIM:
-- FAQAT taqdim etilgan hujjatlar kontekstidan foydalaning
-- HAR DOIM ma'lumot olingan hujjatlarga havolalarni ko'rsating
-- Agar kontekstda kerakli ma'lumot bo'lmasa, halol aytib bering
-- Aniq va tuzilgan javob bering"""
+Sizning vazifangiz - foydalanuvchilarning qonunlar va me'yoriy hujjatlar haqidagi savollariga javob berish.
+Aniq javoblar uchun taqdim etilgan hujjatlar kontekstidan foydalaning.
+Qisqa, lekin to'liq javob bering. Agar ma'lumot yetarli bo'lmasa, shunday ayting.
+Har doim ma'lumot manbasini (hujjat nomi, havola) ko'rsating."""

@@ -83,6 +83,70 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """
+    Database diagnostics endpoint to check if data exists.
+    Useful for debugging when searches return 0 results.
+    """
+    from app.config.database import get_db_context
+    from app.models.metadata import DocumentMetadata
+    from app.models.documents import RussianDocument, UzbekDocument
+
+    try:
+        with get_db_context() as db:
+            # Count documents
+            metadata_count = db.query(DocumentMetadata).count()
+            ru_docs_count = db.query(RussianDocument).count()
+            uz_docs_count = db.query(UzbekDocument).count()
+
+            # Get sample metadata
+            sample_metadata = db.query(DocumentMetadata).limit(3).all()
+            sample_metadata_data = [
+                {
+                    'id': m.id,
+                    'title': m.title[:100],
+                    'doc_type': m.doc_type,
+                    'number': m.number,
+                    'status': m.status
+                }
+                for m in sample_metadata
+            ]
+
+            # Count by status
+            active_count = db.query(DocumentMetadata)\
+                .filter(DocumentMetadata.status == "0")\
+                .count()
+
+            return {
+                "status": "ok",
+                "database": {
+                    "metadata_count": metadata_count,
+                    "russian_documents": ru_docs_count,
+                    "uzbek_documents": uz_docs_count,
+                    "active_metadata": active_count,
+                    "total_documents": metadata_count + ru_docs_count + uz_docs_count
+                },
+                "sample_metadata": sample_metadata_data,
+                "diagnosis": {
+                    "has_metadata": metadata_count > 0,
+                    "has_documents": (ru_docs_count + uz_docs_count) > 0,
+                    "ready_for_search": metadata_count > 0 and (ru_docs_count + uz_docs_count) > 0
+                },
+                "instructions": {
+                    "upload_metadata": "POST /api/metadata/upload/excel with Excel file",
+                    "upload_russian_docs": "POST /api/upload/russian with ZIP file",
+                    "upload_uzbek_docs": "POST /api/upload/uzbek with ZIP file"
+                }
+            }
+    except Exception as e:
+        logger.error(f"Diagnostics error: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",

@@ -73,32 +73,84 @@ class AIService:
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> Optional[str]:
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    self.llm_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model_name,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens
-                    }
-                )
+        """
+        Get chat completion from LLM with retry logic and better error handling.
 
-                if response.status_code == 200:
-                    data = response.json()
-                    return data['choices'][0]['message']['content']
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            temperature: Sampling temperature (0.0-1.0)
+            max_tokens: Maximum tokens in response
+
+        Returns:
+            Response text or None if failed
+        """
+        max_retries = 3
+        retry_delays = [2, 5, 10]  # Seconds to wait between retries
+
+        for attempt in range(max_retries):
+            try:
+                # Increase timeout progressively with retries
+                timeout_value = 90.0 + (attempt * 30.0)  # 90s, 120s, 150s
+
+                async with httpx.AsyncClient(timeout=timeout_value) as client:
+                    logger.info(f"[AI REQUEST] Attempt {attempt + 1}/{max_retries}, timeout={timeout_value}s")
+
+                    response = await client.post(
+                        self.llm_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": self.model_name,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        content = data['choices'][0]['message']['content']
+                        logger.info(f"[AI SUCCESS] Got response ({len(content)} chars)")
+                        return content
+                    elif response.status_code >= 500:
+                        # Server error - retry
+                        logger.warning(f"[AI SERVER ERROR] {response.status_code} - {response.text[:200]}")
+                        if attempt < max_retries - 1:
+                            import asyncio
+                            await asyncio.sleep(retry_delays[attempt])
+                            continue
+                    else:
+                        # Client error - don't retry
+                        logger.error(f"[AI CLIENT ERROR] {response.status_code} - {response.text}")
+                        return None
+
+            except httpx.TimeoutException as e:
+                logger.warning(f"[AI TIMEOUT] Attempt {attempt + 1} timed out after {timeout_value}s")
+                if attempt < max_retries - 1:
+                    import asyncio
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
                 else:
-                    logger.error(f"Chat API error: {response.status_code} - {response.text}")
+                    logger.error(f"[AI TIMEOUT] All {max_retries} attempts failed")
                     return None
 
-        except Exception as e:
-            logger.error(f"Error getting chat completion: {str(e)}")
-            return None
+            except httpx.HTTPStatusError as e:
+                logger.error(f"[AI HTTP ERROR] {e.response.status_code} - {e.response.text[:200]}")
+                return None
+
+            except Exception as e:
+                logger.error(f"[AI ERROR] Unexpected error: {type(e).__name__}: {str(e)}")
+                if attempt < max_retries - 1:
+                    import asyncio
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
+                else:
+                    return None
+
+        logger.error(f"[AI FAILED] All {max_retries} attempts exhausted")
+        return None
 
     async def extract_search_keywords(
         self,

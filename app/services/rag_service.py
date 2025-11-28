@@ -70,14 +70,24 @@ class RAGService:
                 return []
 
             # Execute search
+            # First try active documents only (status "0" or empty)
             results = db.query(DocumentMetadata)\
                 .filter(or_(*conditions))\
                 .filter(or_(
                     DocumentMetadata.status == "0",
-                    DocumentMetadata.status == ""
+                    DocumentMetadata.status == "",
+                    DocumentMetadata.status == None
                 ))\
                 .limit(limit * 2)\
                 .all()
+
+            # If no results, try searching ALL documents (ignore status)
+            if not results:
+                logger.warning("⚠️ [METADATA SEARCH] No active documents found, searching ALL documents...")
+                results = db.query(DocumentMetadata)\
+                    .filter(or_(*conditions))\
+                    .limit(limit * 2)\
+                    .all()
 
             # Score and rank results with improved prioritization
             scored_results = []
@@ -278,6 +288,14 @@ class RAGService:
                 temperature=0.7,
                 max_tokens=2000
             )
+
+            # Handle AI failure
+            if not response:
+                logger.error("❌ [AI FAILED] No response from AI service")
+                if language == 'ru':
+                    response = "Извините, система временно недоступна. Пожалуйста, попробуйте позже."
+                else:
+                    response = "Kechirasiz, tizim vaqtincha ishlamayapti. Iltimos, keyinroq urinib ko'ring."
 
             # Determine source
             source = "dataset" if len(documents) > 0 else "ai_knowledge"

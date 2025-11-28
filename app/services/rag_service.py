@@ -18,8 +18,91 @@ logger = logging.getLogger(__name__)
 class RAGService:
     """Simple, reliable RAG service focused on using metadata + documents"""
 
+    # Stopwords that don't help search (common words)
+    STOPWORDS_RU = {
+        'и', 'в', 'на', 'с', 'по', 'для', 'от', 'к', 'о', 'об', 'из', 'при',
+        'это', 'как', 'что', 'то', 'все', 'был', 'быть', 'мне', 'меня', 'мой',
+        'его', 'ее', 'их', 'этот', 'тот', 'кто', 'где', 'когда', 'так', 'же',
+        'или', 'но', 'да', 'нет', 'не', 'ни', 'бы', 'ли', 'уже', 'еще'
+    }
+
+    STOPWORDS_UZ = {
+        'va', 'yoki', 'bilan', 'uchun', 'dan', 'ga', 'da', 'ni', 'ning',
+        'menga', 'mening', 'senga', 'uning', 'bizning', 'sizning', 'ularning',
+        'bu', 'shu', 'o\'sha', 'osha', 'kim', 'nima', 'qanday', 'qachon', 'qayer',
+        'haqida', 'haqidagi', 'togrida', 'to\'g\'risida', 'togrisida',
+        'ber', 'bering', 'beradi', 'kerak', 'mumkin', 'bo\'ladi', 'boladi',
+        'ma\'lumot', 'malumot', 'aytib', 'gapirib', 'ayting'
+    }
+
+    # Important legal terms with translations
+    LEGAL_TERMS = {
+        # Uzbek → Russian/English equivalents
+        'qonun': ['закон', 'zakon', 'law', 'qonun'],
+        'farmon': ['указ', 'ukaz', 'decree', 'farmon'],
+        'qaror': ['постановление', 'qaror', 'resolution'],
+        'prokuror': ['прокурор', 'prokuratura', 'прокуратура', 'prosecutor'],
+        'prokuratura': ['прокуратура', 'прокурор', 'прокуратуры'],
+        'sud': ['суд', 'court', 'судья', 'судебный'],
+        'huquq': ['право', 'right', 'правовой'],
+        'kodeks': ['кодекс', 'code', 'кодексе'],
+        'soliq': ['налог', 'tax', 'налоговый'],
+        'fuqaro': ['гражданин', 'citizen', 'гражданский'],
+        'jinoyat': ['уголовный', 'criminal', 'преступление'],
+        'mehnat': ['труд', 'labor', 'трудовой'],
+        'oila': ['семья', 'family', 'семейный'],
+        'mulk': ['имущество', 'property', 'собственность'],
+        'davlat': ['государство', 'state', 'государственный'],
+        'hokimiyat': ['власть', 'authority', 'government']
+    }
+
     def __init__(self):
         self.ai_service = AIService()
+
+    def _extract_keywords(self, text: str, language: str) -> tuple[List[str], List[str]]:
+        """
+        Extract meaningful keywords from user message.
+        Removes stopwords and expands legal terms.
+
+        Returns:
+            (keywords, numbers)
+        """
+        text_lower = text.lower()
+
+        # Extract numbers first
+        numbers = re.findall(r'\b\d+\b', text)
+
+        # Extract words (including Uzbek apostrophes)
+        words = re.findall(r"[\w']+", text_lower)
+
+        # Choose stopwords based on language
+        stopwords = self.STOPWORDS_RU if language == 'ru' else self.STOPWORDS_UZ
+
+        # Remove stopwords and short words
+        meaningful_words = [
+            w for w in words
+            if len(w) > 2 and w not in stopwords and not w.isdigit()
+        ]
+
+        # Expand legal terms (add translations)
+        expanded_keywords = []
+        for word in meaningful_words:
+            expanded_keywords.append(word)
+            # Check if this word is a legal term
+            for term, translations in self.LEGAL_TERMS.items():
+                if word in term or term in word:
+                    expanded_keywords.extend(translations[:3])  # Add top 3 translations
+                    break
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_keywords = []
+        for kw in expanded_keywords:
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+
+        return unique_keywords[:15], numbers  # Return top 15 keywords
 
     async def search_metadata(
         self,
@@ -29,8 +112,7 @@ class RAGService:
         limit: int = 5
     ) -> List[DocumentMetadata]:
         """
-        Search metadata table based on user message.
-        Extract keywords and search in title, doc_type, category, number.
+        IMPROVED search metadata table with better keyword extraction.
 
         Args:
             db: Database session
@@ -42,31 +124,38 @@ class RAGService:
             List of DocumentMetadata objects
         """
         try:
-            # Extract simple keywords (words longer than 2 chars)
-            words = re.findall(r'\w+', user_message.lower())
-            keywords = [w for w in words if len(w) > 2][:10]  # Top 10 keywords
+            # Extract keywords using improved method
+            keywords, numbers = self._extract_keywords(user_message, language)
 
-            # Extract numbers (potential document numbers)
-            numbers = re.findall(r'\b\d+\b', user_message)
-
-            logger.info(f"🔍 [METADATA SEARCH] Keywords: {keywords[:5]}, Numbers: {numbers}")
+            logger.info(f"🔍 [METADATA SEARCH] Original: '{user_message}'")
+            logger.info(f"🔍 [KEYWORDS] {keywords[:8]}")
+            logger.info(f"🔍 [NUMBERS] {numbers}")
 
             # Build search conditions
             conditions = []
 
-            # Search by keywords in title, doc_type, category
-            for keyword in keywords[:5]:  # Limit to 5 keywords
+            # PRIORITY 1: Search by document numbers (most specific)
+            for num in numbers[:3]:
+                conditions.append(DocumentMetadata.number.ilike(f'%{num}%'))
+                conditions.append(DocumentMetadata.title.ilike(f'%{num}%'))
+
+            # PRIORITY 2: Search by keywords in multiple fields
+            for keyword in keywords[:10]:  # Use more keywords now that stopwords removed
                 conditions.append(DocumentMetadata.title.ilike(f'%{keyword}%'))
                 conditions.append(DocumentMetadata.doc_type.ilike(f'%{keyword}%'))
                 if DocumentMetadata.category:
                     conditions.append(DocumentMetadata.category.ilike(f'%{keyword}%'))
 
-            # Search by document numbers
-            for num in numbers[:3]:  # Limit to 3 numbers
-                conditions.append(DocumentMetadata.number.ilike(f'%{num}%'))
+            if not conditions:
+                logger.warning("⚠️ [METADATA SEARCH] No search conditions generated")
+                # Fallback: search with raw words if keyword extraction failed
+                raw_words = user_message.lower().split()
+                for word in raw_words[:5]:
+                    if len(word) > 3:
+                        conditions.append(DocumentMetadata.title.ilike(f'%{word}%'))
 
             if not conditions:
-                logger.warning("⚠️ [METADATA SEARCH] No search conditions, returning empty")
+                logger.error("❌ [METADATA SEARCH] Still no conditions, returning empty")
                 return []
 
             # Execute search
@@ -89,7 +178,7 @@ class RAGService:
                     .limit(limit * 2)\
                     .all()
 
-            # Score and rank results with improved prioritization
+            # Score and rank results with IMPROVED scoring
             scored_results = []
             for doc in results:
                 score = 0
@@ -98,50 +187,138 @@ class RAGService:
                 doc_type = doc.doc_type.lower()
                 doc_category = (doc.category or '').lower()
 
+                match_details = []  # Track what matched for debugging
+
                 # PRIORITY 1: Exact number matches (HIGHEST PRIORITY)
                 for num in numbers:
                     # Exact match in number field
-                    if doc_number == num.lower():
-                        score += 100
-                        logger.info(f"   🎯 EXACT NUMBER MATCH: {doc.number} = {num}")
+                    if doc_number == num.lower() or doc_number == f"-{num}":
+                        score += 150
+                        match_details.append(f"EXACT_NUM:{num}")
                     # Number field contains the searched number
                     elif num in doc_number:
-                        score += 50
-                        logger.info(f"   ✓ Number contains: {num} in {doc.number}")
+                        score += 75
+                        match_details.append(f"NUM_CONTAINS:{num}")
                     # Number appears in title
                     elif num in doc_title:
-                        score += 10
+                        score += 20
+                        match_details.append(f"NUM_IN_TITLE:{num}")
 
-                # PRIORITY 2: Keyword matches in different fields
+                # PRIORITY 2: Keyword matches with better scoring
                 for keyword in keywords:
-                    # Title match (important)
+                    # Title match - check for word boundaries
                     if keyword in doc_title:
-                        score += 5
-                    # Doc type match
+                        # Bonus if keyword is at start or as whole word
+                        if doc_title.startswith(keyword) or f' {keyword} ' in doc_title:
+                            score += 10
+                            match_details.append(f"TITLE_WORD:{keyword}")
+                        else:
+                            score += 5
+                            match_details.append(f"TITLE_PART:{keyword}")
+
+                    # Doc type match (very important - закон, указ, etc.)
                     if keyword in doc_type:
-                        score += 3
+                        score += 8
+                        match_details.append(f"TYPE:{keyword}")
+
                     # Category match
                     if keyword in doc_category:
-                        score += 2
+                        score += 4
+                        match_details.append(f"CAT:{keyword}")
+
+                # BONUS: If multiple keywords match, give bonus
+                if len(match_details) >= 3:
+                    score += 10
+                    match_details.append("MULTI_MATCH_BONUS")
 
                 if score > 0:
-                    scored_results.append((score, doc))
-                    logger.debug(f"   Document scored {score}: {doc.title[:50]}... (Number: {doc.number})")
+                    scored_results.append((score, doc, match_details))
+                    logger.info(f"   📄 Doc scored {score}: {doc.title[:50]}... | Matches: {', '.join(match_details[:5])}")
 
             # Sort by score (highest first) and return top results
             scored_results.sort(reverse=True, key=lambda x: x[0])
-            final_results = [doc for score, doc in scored_results[:limit]]
+            final_results = [doc for score, doc, _ in scored_results[:limit]]
 
             # Log top results with scores
-            logger.info(f"✅ [METADATA] Found {len(final_results)} documents")
-            for idx, (score, doc) in enumerate(scored_results[:limit], 1):
-                logger.info(f"   #{idx} Score={score}: {doc.title[:60]}... (№{doc.number})")
+            logger.info(f"✅ [METADATA] Found {len(final_results)} documents after scoring")
+            for idx, (score, doc, matches) in enumerate(scored_results[:limit], 1):
+                logger.info(f"   🏆 #{idx} Score={score}: {doc.title[:60]}... (№{doc.number})")
+                logger.info(f"      Matches: {', '.join(matches)}")
+
+            # If we still have no results, try ONE MORE fallback with relaxed search
+            if not final_results and (keywords or numbers):
+                logger.warning("⚠️ [FALLBACK] No results from normal search, trying relaxed search...")
+                relaxed_results = await self._relaxed_search(db, keywords, numbers, limit)
+                if relaxed_results:
+                    logger.info(f"✅ [FALLBACK] Found {len(relaxed_results)} documents via relaxed search")
+                    return relaxed_results
 
             return final_results
 
         except Exception as e:
             logger.error(f"❌ [METADATA ERROR]: {str(e)}")
             db.rollback()  # IMPORTANT: Rollback transaction on error
+            return []
+
+    async def _relaxed_search(
+        self,
+        db: Session,
+        keywords: List[str],
+        numbers: List[str],
+        limit: int
+    ) -> List[DocumentMetadata]:
+        """
+        Fallback relaxed search when normal search returns nothing.
+        Uses only the MOST important keywords and broader matching.
+        """
+        try:
+            # Take only top 3 most important keywords (likely to be relevant)
+            top_keywords = keywords[:3]
+
+            if not top_keywords and not numbers:
+                return []
+
+            conditions = []
+
+            # Search numbers
+            for num in numbers[:2]:
+                conditions.append(DocumentMetadata.number.ilike(f'%{num}%'))
+                conditions.append(DocumentMetadata.title.ilike(f'%{num}%'))
+
+            # Search only with top keywords
+            for keyword in top_keywords:
+                if len(keyword) > 3:  # Only meaningful words
+                    conditions.append(DocumentMetadata.title.ilike(f'%{keyword}%'))
+
+            if not conditions:
+                return []
+
+            # Search ALL documents (ignore status)
+            results = db.query(DocumentMetadata)\
+                .filter(or_(*conditions))\
+                .limit(limit * 3)\
+                .all()
+
+            logger.info(f"   🔍 Relaxed search with keywords {top_keywords} found {len(results)} raw results")
+
+            # Simple scoring for relaxed search
+            scored = []
+            for doc in results:
+                score = 0
+                for num in numbers:
+                    if num in (doc.number or '').lower():
+                        score += 50
+                for kw in top_keywords:
+                    if kw in doc.title.lower():
+                        score += 5
+                if score > 0:
+                    scored.append((score, doc))
+
+            scored.sort(reverse=True, key=lambda x: x[0])
+            return [doc for _, doc in scored[:limit]]
+
+        except Exception as e:
+            logger.error(f"❌ [RELAXED SEARCH ERROR]: {str(e)}")
             return []
 
     async def get_documents_from_metadata(

@@ -73,17 +73,6 @@ class AIService:
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> Optional[str]:
-        """
-        Get chat completion from Qwen AI.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens in response
-
-        Returns:
-            AI response text or None if failed
-        """
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
